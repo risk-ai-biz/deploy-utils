@@ -1,0 +1,260 @@
+Below are three fully-annotated files you can drop into the root of your repo:
+
+1. pyproject.toml – package definition + build system
+
+
+2. environment.yml – runtime environment for micromamba
+
+
+3. .gitlab-ci.yml – CI pipeline that
+
+builds a wheel,
+
+runs tests inside the micromamba env,
+
+uploads the wheel to Nexus (PyPI-style repo),
+
+installs from Nexus in the deploy job.
+
+
+
+
+> Placeholders are written in ALL_CAPS_WITH_UNDERSCORES; create protected CI variables with those names (or rename them consistently).
+
+
+
+
+---
+
+1 pyproject.toml
+
+# ────────────────────────────────────────────────────────────────
+# pyproject.toml  – This makes the repo an installable package.
+# Hatchling is a zero-config PEP-517 backend; pure-Python wheels
+# build in under a second.
+# ────────────────────────────────────────────────────────────────
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "my_app"             # ⚠️  the import *and* wheel name
+version = "1.0.0"           # manual; swap to hatch_vcs for SCM versioning
+description = "Awesome thing that lives in GitLab"
+readme = "README.md"
+authors = [
+    {name = "Your Name", email = "you@example.com"}
+]
+license = "MIT"
+requires-python = ">=3.10"
+
+dependencies = [
+    "requests>=2.32,<3",
+    "fastapi>=0.111,<1",
+]
+
+[project.scripts]           # exposes `my-app` on $PATH after install
+my-app = "my_app.__main__:cli"
+
+# Optional groups (dev, docs, etc.) – keep runtime deps above.
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "ruff>=0.4",
+]
+
+
+---
+
+2 environment.yml
+
+# ────────────────────────────────────────────────────────────────
+# environment.yml  – micromamba reads this to build the *binary*
+# runtime (Python, C libs, etc.).  Do NOT list your own package
+# here; it will come from Nexus in the pipeline.
+# ────────────────────────────────────────────────────────────────
+name: prod
+channels:
+  - conda-forge
+dependencies:
+  # Core interpreter
+  - python=3.10
+  - pip
+
+  # Compiled / system libs go here (examples):
+  # - numpy=1.26
+  # - pandas=2.2
+  # - libpq          # PostgreSQL client
+
+  # If you need twine in runtime env (usually only CI build job)
+  # add: - twine
+
+
+---
+
+3 .gitlab-ci.yml
+
+# ────────────────────────────────────────────────────────────────
+# .gitlab-ci.yml  – 4-stage pipeline: build → test → publish → deploy
+# Runner image is minimal Debian; assumes `/usr/local/bin/micromamba`
+# is already present (baked in custom runner image).
+# ────────────────────────────────────────────────────────────────
+image: debian:bookworm
+
+stages: [build, test, publish, deploy]
+
+# ---------- global vars & cache ---------------------------------
+variables:
+  MAMBA_ROOT_PREFIX: "$CI_PROJECT_DIR/.mamba"      # stays inside job dir
+  ENV_NAME: prod                                   # env name reused in jobs
+  WHEEL_DIR: "dist"                                # where build places wheels
+  # Nexus (PyPI format) – set these as protected CI variables
+  NEXUS_PYPI_URL: "$NEXUS_PYPI_URL"
+  TWINE_USERNAME: "$NEXUS_PYPI_USERNAME"
+  TWINE_PASSWORD: "$NEXUS_PYPI_PASSWORD"
+
+cache:
+  key: "$CI_COMMIT_REF_SLUG-mamba"
+  paths:
+    - .mamba/pkgs
+
+# ---------- helper template -------------------------------------
+.before_mamba: &before_mamba |
+  eval "$(micromamba shell hook -s bash)"
+  micromamba activate base   # base is implicit root env
+
+# =================================================================
+# (1) BUILD  – create wheel artifact
+# =================================================================
+build_wheel:
+  stage: build
+  script:
+    - *before_mamba
+    # Create isolated build env (fast, avoids polluting prod env)
+    - micromamba create -y -n build python=3.10 pip build twine
+    - micromamba activate build
+    - python -m build --wheel        # outputs to dist/*.whl
+  artifacts:
+    paths: ["${WHEEL_DIR}/*.whl"]
+    expire_in: 1 week
+
+# =================================================================
+# (2) TEST  – solve env, install wheel, run tests
+# =================================================================
+test:
+  stage: test
+  needs: [build_wheel]
+  script:
+    - *before_mamba
+    # Create/refresh prod env from environment.yml
+    - micromamba env update -n "$ENV_NAME" -f environment.yml --yes --prune
+    - micromamba activate "$ENV_NAME"
+    # Install freshly-built wheel into that env
+    - pip install "${WHEEL_DIR}"/my_app-*.whl
+    # Run your test suite
+    - pytest -q
+
+# =================================================================
+# (3) PUBLISH  – upload wheel to Nexus PyPI repo
+#      (Runs only on main && after successful tests.)
+# =================================================================
+publish_wheel:
+  stage: publish
+  needs: [test]
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      when: on_success
+    - when: never
+  script:
+    - *before_mamba
+    - micromamba activate build        # build env already has twine
+    # Upload – twine reads TWINE_* env vars
+    - twine upload --repository-url "$NEXUS_PYPI_URL" "${WHEEL_DIR}"/my_app-*.whl
+
+# =================================================================
+# (4) DEPLOY  – provision env from environment.yml + wheel on Nexus
+# =================================================================
+deploy_prod:
+  stage: deploy
+  needs: [publish_wheel]
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      when: on_success
+    - when: never
+  script:
+    - *before_mamba
+    # Build fresh env *without* local wheel – will pull from Nexus.
+    - micromamba env update -n "$ENV_NAME" -f environment.yml --yes --prune
+    - micromamba activate "$ENV_NAME"
+    # Install your package from Nexus PyPI index
+    - pip install --index-url "$NEXUS_PYPI_URL/simple" --no-deps my_app==1.0.0
+    # ---------- start your app ----------
+    - my-app                       # replace with gunicorn, uvicorn, etc.
+
+How the pipeline flows
+
+build_wheel  →  test  →  publish_wheel  →  deploy_prod
+     │             │          │                │
+     │  (same env) │          │                │
+     └─ artifacts ─┘          │                │
+                              ▼                ▼
+             wheel uploaded to Nexus   prod host installs via pip
+
+
+---
+
+Nexus setup (once per repo / team)
+
+1. Create a “Hosted PyPI repository” in Nexus (for example pypi-internal).
+
+
+2. Note the repository upload URL
+
+https://nexus.corp.local/repository/pypi-internal/
+
+
+3. Generate a deployment-only user (or token) with “Deploy” privs on that repo.
+
+
+4. Add these protected variables in GitLab → Settings › CI/CD › Variables
+
+NEXUS_PYPI_URL       → https://nexus.corp.local/repository/pypi-internal/
+
+NEXUS_PYPI_USERNAME  → deploy-ci
+
+NEXUS_PYPI_PASSWORD  → ************
+
+
+
+
+> If your Nexus uses bearer tokens, set TWINE_PASSWORD to the token value and TWINE_USERNAME to anything (Twine still demands a user field).
+
+
+
+Once published, any machine can recreate the full environment:
+
+# 1) Get micromamba
+curl -Ls https://micro.mamba.pm/api/micromamba/linux-64/latest | tar -xj -C /usr/local/bin --strip-components=1 bin/micromamba
+export MAMBA_ROOT_PREFIX="$HOME/.mamba"
+
+# 2) Build Conda-level deps
+micromamba env create -n prod -f environment.yml
+
+# 3) Install your app from Nexus
+micromamba activate prod
+pip install --index-url https://nexus.corp.local/repository/pypi-internal/simple --no-deps my_app==1.0.0
+
+
+---
+
+Ready to roll
+
+Commit the three files above.
+
+Add the Nexus credentials as GitLab CI variables.
+
+Push to a feature branch → MR → merge → wheel appears in Nexus; deploy job pulls from there.
+
+
+If you later need multiple versions or lock files (conda-lock, hatch versioning, etc.), we can layer those on, but this gives you a fully repeatable CI → artifact → Nexus → prod path right away.
+
