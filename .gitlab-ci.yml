@@ -1,0 +1,97 @@
+# ────────────────────────────────────────────────────────
+# .gitlab-ci.yml  – 4-stage pipeline: build → test → publish → deploy
+# Runner image is minimal Debian; assumes `/usr/local/bin/micromamba`
+# is already present (baked in custom runner image).
+# ────────────────────────────────────────────────────────
+image: debian:bookworm
+
+stages: [build, test, publish, deploy]
+
+# ---------- global vars & cache ---------------------------------
+variables:
+  MAMBA_ROOT_PREFIX: "$CI_PROJECT_DIR/.mamba"      # stays inside job dir
+  ENV_NAME: prod                                   # env name reused in jobs
+  WHEEL_DIR: "dist"                                # where build places wheels
+  # Nexus (PyPI format) – set these as protected CI variables
+  NEXUS_PYPI_URL: "$NEXUS_PYPI_URL"
+  TWINE_USERNAME: "$NEXUS_PYPI_USERNAME"
+  TWINE_PASSWORD: "$NEXUS_PYPI_PASSWORD"
+
+cache:
+  key: "$CI_COMMIT_REF_SLUG-mamba"
+  paths:
+    - .mamba/pkgs
+
+# ---------- helper template -------------------------------------
+.before_mamba: &before_mamba |
+  eval "$(micromamba shell hook -s bash)"
+  micromamba activate base   # base is implicit root env
+
+# =================================================================
+# (1) BUILD  – create wheel artifact
+# =================================================================
+build_wheel:
+  stage: build
+  script:
+    - *before_mamba
+    # Create isolated build env (fast, avoids polluting prod env)
+    - micromamba create -y -n build python=3.10 pip build twine
+    - micromamba activate build
+    - python -m build --wheel        # outputs to dist/*.whl
+  artifacts:
+    paths: ["${WHEEL_DIR}/*.whl"]
+    expire_in: 1 week
+
+# =================================================================
+# (2) TEST  – solve env, install wheel, run tests
+# =================================================================
+test:
+  stage: test
+  needs: [build_wheel]
+  script:
+    - *before_mamba
+    # Create/refresh prod env from environment.yml
+    - micromamba env update -n "$ENV_NAME" -f environment.yml --yes --prune
+    - micromamba activate "$ENV_NAME"
+    # Install freshly-built wheel into that env
+    - pip install "${WHEEL_DIR}"/my_app-*.whl
+    # Run your test suite
+    - pytest -q
+
+# =================================================================
+# (3) PUBLISH  – upload wheel to Nexus PyPI repo
+#      (Runs only on main && after successful tests.)
+# =================================================================
+publish_wheel:
+  stage: publish
+  needs: [test]
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      when: on_success
+    - when: never
+  script:
+    - *before_mamba
+    - micromamba activate build        # build env already has twine
+    # Upload – twine reads TWINE_* env vars
+    - twine upload --repository-url "$NEXUS_PYPI_URL" "${WHEEL_DIR}"/my_app-*.whl
+
+# =================================================================
+# (4) DEPLOY  – provision env from environment.yml + wheel on Nexus
+# =================================================================
+deploy_prod:
+  stage: deploy
+  needs: [publish_wheel]
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      when: on_success
+    - when: never
+  script:
+    - *before_mamba
+    # Build fresh env *without* local wheel – will pull from Nexus.
+    - micromamba env update -n "$ENV_NAME" -f environment.yml --yes --prune
+    - micromamba activate "$ENV_NAME"
+    # Install your package from Nexus PyPI index
+    - pip install --index-url "$NEXUS_PYPI_URL/simple" --no-deps my_app==1.0.0
+    # ---------- start your app ----------
+    - my-app                       # replace with gunicorn, uvicorn, etc.
+

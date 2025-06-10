@@ -1,0 +1,20 @@
+# ───────────────────────────────────────────────────────
+# environment.yml  – micromamba reads this to build the *binary*
+# runtime (Python, C libs, etc.).  Do NOT list your own package
+# here; it will come from Nexus in the pipeline.
+# ───────────────────────────────────────────────────────
+name: prod
+channels:
+  - conda-forge
+dependencies:
+  # Core interpreter
+  - python=3.10
+  - pip
+
+  # Compiled / system libs go here (examples):
+  # - numpy=1.26
+  # - pandas=2.2
+  # - libpq          # PostgreSQL client
+
+  # If you need twine in runtime env (usually only CI build job)
+  # add: - twine

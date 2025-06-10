@@ -1,0 +1,34 @@
+# ────────────────────────────────────────────────────────
+# pyproject.toml  – This makes the repo an installable package.
+# Hatchling is a zero-config PEP-517 backend; pure-Python wheels
+# build in under a second.
+# ────────────────────────────────────────────────────────
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "my_app"             # ⚠️  the import *and* wheel name
+version = "1.0.0"           # manual; swap to hatch_vcs for SCM versioning
+description = "Awesome thing that lives in GitLab"
+readme = "README.md"
+authors = [
+    {name = "Your Name", email = "you@example.com"}
+]
+license = "MIT"
+requires-python = ">=3.10"
+
+dependencies = [
+    "requests>=2.32,<3",
+    "fastapi>=0.111,<1",
+]
+
+[project.scripts]           # exposes `my-app` on $PATH after install
+my-app = "my_app.__main__:cli"
+
+# Optional groups (dev, docs, etc.) – keep runtime deps above.
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "ruff>=0.4",
+]
