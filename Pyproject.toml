@@ -1,0 +1,20 @@
+[project]
+name = "myco-workspace"      # not published – just a placeholder
+version = "0.0.0"
+description = "Internal workspace root"
+readme = "README.md"
+requires-python = ">=3.12"
+
+[tool.uv.workspace]
+# Everything listed here is part of the workspace → gets an editable install
+members = [
+    "packages/common",
+    "packages/data_models",
+    "apps/ingestion",
+    "apps/reporting",
+    # … add the rest …
+]
+
+[build-system]
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
