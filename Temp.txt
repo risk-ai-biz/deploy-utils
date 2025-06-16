@@ -230,3 +230,125 @@ GitLab CI becomes extremely small – no need for Poetry or pip-tools, just uv.
 
 With this structure you can keep scaling the monorepo without losing dependency sanity or CI speed. Happy hacking!
 
+
+
+
+What is a UV workspace?
+
+“A workspace is a collection of one or more packages, called workspace members, that are managed together.” 
+In practice that means:
+
+Concept	Effect in day-to-day work
+
+One lock-file (uv.lock)	All members resolve to the same dependency graph, eliminating “works on my app but not on yours”. 
+One virtual-env (.venv)	uv sync installs every member editable into that env, so edits are visible everywhere immediately.
+One Python version	UV intersects the requires-python spec of every member; if they disagree the lock will fail. 
+Many pyproject.tomls	Each package or app declares its own name, version, dependencies, entry points, etc.
+Cargo-style CLI	uv run, uv sync, uvx <tool> default to the workspace root but accept --package foo to target a single member. 
+
+
+
+---
+
+How does UV know a repo is a workspace?
+
+Add two tables to the root pyproject.toml:
+
+[tool.uv.workspace]         # ① declares “this is a workspace”
+members  = ["packages/*", "apps/*"]
+exclude  = ["packages/legacy_*"]   # optional glob patterns
+
+[tool.uv.sources]           # ② tells uv that some deps come *from* the workspace
+common-utils = { workspace = true }
+
+Every directory matched by members must contain its own pyproject.toml.
+
+Anything excluded is ignored even if it has a project file. 
+
+workspace = true means “satisfy this requirement with the editable copy that lives in the repo; don’t fetch it from PyPI.” 
+
+
+
+---
+
+Typical commands
+
+Task	Command	What happens
+
+Create env + install everything	uv sync --all-packages	Installs every member editable plus its external deps.
+Add a new dep to one member	cd packages/common && uv add rich	Updates that member’s pyproject.toml; run uv lock to refresh the workspace graph.
+Run a script in another member	uv run --package ingestion ingest --help	Executes inside the shared .venv, but sets PYTHONPATH so ingestion is the active project.
+Freeze deps	uv lock	Re-solves entire workspace and rewrites uv.lock.
+Build & publish just one app	uv build --package reporting then uv publish --package reporting	Generates wheel/sdist for that member only, still using the workspace lockfile.
+
+
+
+---
+
+When workspaces shine … and when they don’t
+
+Great for
+
+Mono-repos that mix multiple libraries + a few services (your case exactly).
+
+Teams that want one CI pipeline and consistent dependency resolution.
+
+Fast local DX – no more juggling 10 virtual-envs.
+
+
+Not ideal if
+
+Members truly need conflicting library versions.
+
+You must test one member on Py-3.9 while others are 3.12 (the single-Python rule blocks this). 
+
+You want hard isolation of transitive imports – UV can’t stop package-A from import sqlalchemy even if only package-B declared it. 
+Use separate repos or plain path = "..." dependencies instead. 
+
+
+
+---
+
+Quick mental model
+
+┌───────────────────────────────┐
+│  Workspace root               │  ← has its own project definition
+│  - pyproject.toml   (① + ②)   │
+│  - uv.lock (one per repo)     │
+│  - .venv/ (one per repo)      │
+│                               │
+│  members/                     │
+│  ├── lib_a/pyproject.toml     │  ← library
+│  ├── lib_b/pyproject.toml     │  ← library
+│  └── app_ingest/pyproject.toml│  ← runnable service
+└───────────────────────────────┘
+
+Think of the workspace root as a meta-package that happens to own the lockfile and the virtual-env.
+
+
+---
+
+Cheat-sheet for your team
+
+# setup
+git clone … && cd repo
+uv sync --all-packages
+
+# everyday hacking
+uv run pytest -q        # tests entire workspace
+uv run --package lib_a pytest tests
+uv add --package app_ingest fastapi[all]
+uv lock                 # regenerate lock
+
+# CI
+uv sync --all-packages --group dev,test
+uv run ruff check .
+uv run coverage run -m pytest
+
+
+---
+
+TL;DR
+
+UV workspaces give you Cargo-like project orchestration for Python: one lockfile, one env, many packages – perfect for a monorepo of shared libraries and ~10 business apps. Define tool.uv.workspace + tool.uv.sources once, and UV handles the rest.
+
