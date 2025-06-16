@@ -1,0 +1,17 @@
+[project]
+name            = "myco-common"
+version         = "0.3.1"
+description     = "Shared helpers, logging, small utilities"
+requires-python = ">=3.12"
+dependencies    = [
+    "pydantic>=2.6",
+    "loguru>=0.7",
+]
+
+[project.optional-dependencies]
+test = ["pytest", "coverage[toml]"]
+dev  = ["ruff", "mypy"]
+
+[build-system]
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
