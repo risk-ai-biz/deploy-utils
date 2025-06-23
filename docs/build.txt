@@ -1,0 +1,104 @@
+1  Why bother with a snapshot repository?
+
+Goal	How the “snapshot” channel helps
+
+Early integration feedback	Publish every dev/CI build (1.5.0.dev8, 2.0.0b1 …). Internal services can install and shake-out bugs days before the formal cut.
+Versioned artefacts for lockfiles	Colleagues can pin exact dev builds in their uv.lock while mainline work continues.
+Safe separation	The release repo stays clean (only finals like 1.5.0). No accidental overwrite or rollback headaches.
+Faster CI	Nexus caches the wheels; CI jobs fetch from your LAN instead of PyPI each time.
+
+
+The split is just convention—Nexus itself can’t enforce PEP 440 semantics for PyPI uploads, so you gate by repository URL + version string. (Some teams try Nexus “content selectors”, but PyPI uploads hit the repo root so selectors can’t block them).
+
+
+---
+
+2  Which files should you upload?
+
+Artefact	Ship it?	Reason
+
+Wheel (.whl)	Yes	Fast installs; repeat-able byte-for-byte across machines.
+Source d-ist (.tar.gz/zip)	Usually yes	Fallback for platforms you didn’t pre-build; lets devs read the code and re-wheel locally.
+
+
+uv build produces both automatically—it builds an sdist first, then wheel(s) from that sdist. Only omit one with --wheel or --sdist if you have a policy to match.
+
+> Nexus view: each file is a separate “asset” under one “component”; storage cost is tiny, and having both avoids “can’t find a wheel for macOS-arm64” surprises in the future.
+
+
+
+
+---
+
+3  Telling uv where to publish
+
+Add two indexes to pyproject.toml:
+
+[[tool.uv.index]]
+name        = "corp-release"
+url         = "https://nexus.example.com/repository/pypi-release/simple/"
+publish-url = "https://nexus.example.com/repository/pypi-release/legacy/"
+default     = true              # normal installs resolve here
+
+[[tool.uv.index]]
+name        = "corp-snapshot"
+url         = "https://nexus.example.com/repository/pypi-snapshot/simple/"
+publish-url = "https://nexus.example.com/repository/pypi-snapshot/legacy/"
+explicit    = true              # opt-in only
+
+url must end in /simple/, while publish-url is the legacy-API root that accepts uploads.
+
+Dev build (snapshot):
+
+
+uv build --no-sources        # see §4
+uv publish --index corp-snapshot
+
+Formal release:
+
+
+hatch version patch          # or semantic-release etc.
+uv build --no-sources
+uv publish --index corp-release --check-url https://nexus.example.com/repository/pypi-release/simple/
+
+Credentials can come from UV_PUBLISH_TOKEN or the per-index env-vars UV_INDEX_<NAME>_USERNAME/PASSWORD (replace <NAME> with upper-case snake).
+
+
+---
+
+4  What --no-sources actually does
+
+If your project maps private packages via [tool.uv.sources], uv build would normally install those private paths while building, which might hide missing dependencies.
+uv build --no-sources tells uv to ignore every local/URL/Git override and resolve only against published metadata, matching what PyPI/Nexus will do. It’s the packaging equivalent of “compile with -Werror”.
+
+
+---
+
+5  Extra Nexus & GitLab CI tips
+
+Topic	Tip
+
+Repo types	Create two hosted PyPI repos (pypi-snapshot, pypi-release). Put them in a group repo for consumers so uv sync only needs one URL.
+Write permissions	Give CI write to snapshot; restrict release to a protected GitLab environment (e.g. only when a tag or main-branch pipeline passes).
+Retention / cleanup	Attach a Nexus cleanup policy (e.g. keep last 30 dev builds per component) to snapshot to stop disk growth.
+Version collisions	Nexus rejects re-uploading the exact same filename. Use unique dev identifiers (1.6.0.dev20250623+abc123) or let hatch version dev handle it.
+GitLab runner image	Use the official Astral image (or `curl
+uvx and your proxy	Remember: tool commands ignore project config—uvx only reads user-/system-level uv.toml. Keep your native-tls, allow-insecure-host, and index creds in ~/.config/uv/uv.toml so tools (ruff, black…) work everywhere.
+
+
+
+---
+
+TL;DR
+
+Push snapshots for every dev build ⇒ faster feedback, safer releases.
+
+Ship both wheel and sdist unless you have a very tight platform matrix.
+
+Configure two indexes (corp-snapshot, corp-release) with their own publish-url; pick which one at uv publish time.
+
+Always build with uv build --no-sources so what you upload really works when your sources table is absent.
+
+
+Set that up once and the rest of your uv-centric workflow—local installs, CI, promotion—just flows. Happy publishing! 🚀
+
